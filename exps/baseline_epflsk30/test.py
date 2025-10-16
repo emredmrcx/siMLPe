@@ -5,8 +5,7 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 from config  import config
 from model import siMLPe as Model
-from datasets.h36m_eval import H36MEval
-from utils.misc import rotmat2xyz_torch, rotmat2euler_torch
+from datasets.epfl_sk30_eval import EPFLSK30Eval
 
 import torch
 from torch.utils.data import DataLoader
@@ -24,23 +23,25 @@ def get_dct_matrix(N):
     idct_m = np.linalg.inv(dct_m)
     return dct_m, idct_m
 
-dct_m,idct_m = get_dct_matrix(config.motion.h36m_input_length_dct)
+dct_m,idct_m = get_dct_matrix(config.motion.epfl_input_length_dct)
 dct_m = torch.tensor(dct_m).float().cuda().unsqueeze(0)
 idct_m = torch.tensor(idct_m).float().cuda().unsqueeze(0)
 
-def regress_pred(model, pbar, num_samples, joint_used_xyz, m_p3d_h36):
-    joint_to_ignore = np.array([16, 20, 23, 24, 28, 31]).astype(np.int64)
-    joint_equal = np.array([13, 19, 22, 13, 27, 30]).astype(np.int64)
+def regress_pred(model, pbar, num_samples, m_p3d_h36):
 
     for (motion_input, motion_target) in pbar:
         motion_input = motion_input.cuda()
         b,n,c,_ = motion_input.shape
         num_samples += b
 
-        motion_input = motion_input.reshape(b, n, 32, 3)
-        motion_input = motion_input[:, :, joint_used_xyz].reshape(b, n, -1)
+        # Reshape to (b, n, 51)
+        motion_input = motion_input.reshape(b, n, 17, 3)
+        motion_input = motion_input.reshape(b, n, -1)
         outputs = []
-        step = config.motion.h36m_target_length_train
+        
+        # step = training output length
+        # autoregressively predict poses 
+        step = config.motion.epfl_target_length_train  
         if step == 25:
             num_step = 1
         else:
@@ -49,17 +50,19 @@ def regress_pred(model, pbar, num_samples, joint_used_xyz, m_p3d_h36):
             with torch.no_grad():
                 if config.deriv_input:
                     motion_input_ = motion_input.clone()
-                    motion_input_ = torch.matmul(dct_m[:, :, :config.motion.h36m_input_length], motion_input_.cuda())
+                    motion_input_ = torch.matmul(dct_m[:, :, :config.motion.epfl_input_length], motion_input_.cuda())
                 else:
                     motion_input_ = motion_input.clone()
                 output = model(motion_input_)
-                output = torch.matmul(idct_m[:, :config.motion.h36m_input_length, :], output)[:, :step, :]
+                output = torch.matmul(idct_m[:, :config.motion.epfl_input_length, :], output)[:, :step, :]
                 if config.deriv_output:
                     output = output + motion_input[:, -1:, :].repeat(1,step,1)
 
-            output = output.reshape(-1, 22*3)
+            output = output.reshape(-1, 17*3)
             output = output.reshape(b,step,-1)
             outputs.append(output)
+            
+            # Update input: remove first 'step_length' poses and append predicted poses
             motion_input = torch.cat([motion_input[:, step:], output], axis=1)
         motion_pred = torch.cat(outputs, axis=1)[:,:25]
 
@@ -69,14 +72,7 @@ def regress_pred(model, pbar, num_samples, joint_used_xyz, m_p3d_h36):
         motion_gt = motion_target.clone()
 
         motion_pred = motion_pred.detach().cpu()
-        pred_rot = motion_pred.clone().reshape(b,n,22,3)
-        motion_pred = motion_target.clone().reshape(b,n,32,3)
-        motion_pred[:, :, joint_used_xyz] = pred_rot
-
-        tmp = motion_gt.clone()
-        tmp[:, :, joint_used_xyz] = motion_pred[:, :, joint_used_xyz]
-        motion_pred = tmp
-        motion_pred[:, :, joint_to_ignore] = motion_pred[:, :, joint_equal]
+        motion_pred = motion_pred.clone().reshape(b,n,17,3)
 
         mpjpe_p3d_h36 = torch.sum(torch.mean(torch.norm(motion_pred*1000 - motion_gt*1000, dim=3), dim=2), dim=0)
         m_p3d_h36 += mpjpe_p3d_h36.cpu().numpy()
@@ -85,16 +81,15 @@ def regress_pred(model, pbar, num_samples, joint_used_xyz, m_p3d_h36):
 
 def test(config, model, dataloader) :
 
-    m_p3d_h36 = np.zeros([config.motion.h36m_target_length])
-    titles = np.array(range(config.motion.h36m_target_length)) + 1
-    joint_used_xyz = np.array([2,3,4,5,7,8,9,10,12,13,14,15,17,18,19,21,22,25,26,27,29,30]).astype(np.int64)
+    m_p3d_h36 = np.zeros([config.motion.epfl_target_length_eval])
+    titles = np.array(range(config.motion.epfl_target_length_eval)) + 1
     num_samples = 0
 
     pbar = dataloader
-    m_p3d_h36 = regress_pred(model, pbar, num_samples, joint_used_xyz, m_p3d_h36)
+    m_p3d_h36 = regress_pred(model, pbar, num_samples, m_p3d_h36)
 
     ret = {}
-    for j in range(config.motion.h36m_target_length):
+    for j in range(config.motion.epfl_target_length_eval):
         ret["#{:d}".format(titles[j])] = [m_p3d_h36[j], m_p3d_h36[j]]
     return [round(ret[key][0], 1) for key in results_keys]
 
@@ -108,22 +103,15 @@ if __name__ == "__main__":
 
     state_dict = torch.load(args.model_pth)
     
-    #E fix key mismatch between saved model and current model
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        if "motion_transformer.transformer" in k:
-            new_k = k.replace("motion_transformer.transformer", "motion_mlp.mlps")
-        else:
-            new_k = k
-        new_state_dict[new_k] = v
 
-    model.load_state_dict(new_state_dict, strict=True)
+        
+    model.load_state_dict(state_dict, strict=True)
     
     model.eval()
     model.cuda()
 
-    config.motion.h36m_target_length = config.motion.h36m_target_length_eval
-    dataset = H36MEval(config, 'test')
+    config.motion.epfl_target_length = config.motion.epfl_target_length_eval
+    dataset = EPFLSK30Eval(config, 'test')
 
     shuffle = False
     sampler = None

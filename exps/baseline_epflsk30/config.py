@@ -92,6 +92,7 @@ C.motion_fc_out.temporal_fc = False
 """Train Config"""
 C.batch_size = 256
 C.num_workers = 8
+C.num_epochs = 10
 
 C.cos_lr_max=1e-5
 C.cos_lr_min=5e-8
@@ -105,7 +106,7 @@ C.shift_step = 1
 
 """Display Config"""
 C.print_every = 10 #100
-C.save_every = 5000
+C.save_steps = [1, 100, 1000, 5000, 10000, 15000, 20000, 25000, 30000, 35000, 40000]
 
 
 if __name__ == '__main__':

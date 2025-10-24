@@ -12,6 +12,27 @@ from torch.utils.data import DataLoader
 
 results_keys = ['#2', '#4', '#8', '#10', '#14', '#18', '#22', '#25']
 
+# Joint names for EPFL-SK30 dataset
+joint_names = [
+    'Root',
+    'LeftHead',
+    'RightHead',
+    'LeftBody',
+    'RightBody',
+    'LeftShoulder',
+    'RightShoulder',
+    'LeftArm',
+    'RightArm',
+    'LeftForearm',
+    'RightForearm',
+    'LeftHip',
+    'RightHip',
+    'LeftKnee',
+    'RightKnee',
+    'LeftFoot',
+    'RightFoot'
+]
+
 def get_dct_matrix(N):
     dct_m = np.eye(N)
     for k in np.arange(N):
@@ -27,7 +48,7 @@ dct_m,idct_m = get_dct_matrix(config.motion.epfl_input_length_dct)
 dct_m = torch.tensor(dct_m).float().cuda().unsqueeze(0)
 idct_m = torch.tensor(idct_m).float().cuda().unsqueeze(0)
 
-def regress_pred(model, pbar, num_samples, m_p3d_h36):
+def regress_pred(model, pbar, num_samples, m_p3d_h36_per_joint):
 
     for (motion_input, motion_target) in pbar:
         motion_input = motion_input.cuda()
@@ -74,29 +95,43 @@ def regress_pred(model, pbar, num_samples, m_p3d_h36):
         motion_pred = motion_pred.detach().cpu()
         motion_pred = motion_pred.clone().reshape(b,n,17,3)
 
-        mpjpe_p3d_h36 = torch.sum(torch.mean(torch.norm(motion_pred*1000 - motion_gt*1000, dim=3), dim=2), dim=0)
-        m_p3d_h36 += mpjpe_p3d_h36.cpu().numpy()
-    m_p3d_h36 = m_p3d_h36 / num_samples
-    return m_p3d_h36
+        # Calculate MPJPE per joint for each timestep
+        # dim=3: L2 norm over (x,y,z) -> (b, n, 17)
+        # dim=0: sum over batch -> (n, 17)
+        mpjpe_p3d_h36_per_joint = torch.sum(torch.norm(motion_pred*1000 - motion_gt*1000, dim=3), dim=0)
+        m_p3d_h36_per_joint += mpjpe_p3d_h36_per_joint.cpu().numpy()
+    
+    m_p3d_h36_per_joint = m_p3d_h36_per_joint / num_samples
+    return m_p3d_h36_per_joint
 
-def test(config, model, dataloader) :
+def test(config, model, dataloader, return_per_joint=False):
 
-    m_p3d_h36 = np.zeros([config.motion.epfl_target_length_eval])
+    m_p3d_h36_per_joint = np.zeros([config.motion.epfl_target_length_eval, 17])  # 17 joints
     titles = np.array(range(config.motion.epfl_target_length_eval)) + 1
     num_samples = 0
 
     pbar = dataloader
-    m_p3d_h36 = regress_pred(model, pbar, num_samples, m_p3d_h36)
+    m_p3d_h36_per_joint = regress_pred(model, pbar, num_samples, m_p3d_h36_per_joint)
+    
+    # Calculate mean over joints
+    m_p3d_h36 = m_p3d_h36_per_joint.mean(axis=1)
 
     ret = {}
+    ret_per_joint = {}
     for j in range(config.motion.epfl_target_length_eval):
         ret["#{:d}".format(titles[j])] = [m_p3d_h36[j], m_p3d_h36[j]]
-    return [round(ret[key][0], 1) for key in results_keys]
+        ret_per_joint["#{:d}".format(titles[j])] = m_p3d_h36_per_joint[j]
+    
+    if return_per_joint:
+        return [round(ret[key][0], 1) for key in results_keys], ret_per_joint
+    else:
+        return [round(ret[key][0], 1) for key in results_keys]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('--model-pth', type=str, default=None, help='=encoder path')
+    parser.add_argument('--show-per-joint', action='store_true', help='Show per-joint errors')
     args = parser.parse_args()
 
     model = Model(config)
@@ -120,5 +155,21 @@ if __name__ == "__main__":
                             num_workers=1, drop_last=False,
                             sampler=sampler, shuffle=shuffle, pin_memory=True)
 
-    print(test(config, model, dataloader))
+    if args.show_per_joint:
+        acc_tmp, ret_per_joint = test(config, model, dataloader, return_per_joint=True)
+        print("Overall Results:")
+        print(results_keys)
+        print(acc_tmp)
+        
+        print("\n" + "="*60)
+        print("Per-Joint Errors for each timestep:")
+        print("="*60)
+        for key in results_keys:
+            print(f"\nTimestep {key}:")
+            per_joint_errors = ret_per_joint[key]
+            for joint_idx in range(len(per_joint_errors)):
+                print(f"  Joint {joint_idx:2d} ({joint_names[joint_idx]:13s}): {per_joint_errors[joint_idx]:.3f} mm")
+            print(f"  Average: {acc_tmp[results_keys.index(key)]:.1f} mm")
+    else:
+        print(test(config, model, dataloader))
 

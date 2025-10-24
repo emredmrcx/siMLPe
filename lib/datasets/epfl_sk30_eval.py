@@ -19,6 +19,7 @@ class EPFLSK30Eval(data.Dataset):
         
         self.motion_dim = config.motion.dim
         self.shift_step = config.shift_step
+        self.sample_rate = config.motion.sample_rate
         self._collect_all()
         self._file_length = len(self.data_idx)
     
@@ -81,7 +82,7 @@ class EPFLSK30Eval(data.Dataset):
             if N < self.epfl_motion_target_length + self.epfl_motion_input_length:
                 continue
             
-            sample_rate = 1
+            sample_rate = self.sample_rate
             sampled_index = np.arange(0, N, sample_rate)
             epfl_motion_poses = epfl_motion_poses[sampled_index]
             
